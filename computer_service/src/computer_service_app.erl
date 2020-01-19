@@ -1,7 +1,7 @@
 %% Author: uabjle
 %% Created: 10 dec 2012
 %% Description: TODO: Add description to application_org
--module(iaas_service_app).
+-module(computer_service_app).
  
 -behaviour(application).
 %% --------------------------------------------------------------------
@@ -44,7 +44,15 @@
 %%          {error, Reason}
 %% --------------------------------------------------------------------
 start(_Type, _StartArgs) ->
-    {ok,Pid}= iaas_service_sup:start(),
+    {ok,{ComputerIpAddr,ComputerPort}}=application:get_env(computer_ip_address_port),
+    {ok,MinVmPort}=application:get_env(min_vm_port),
+    {ok,MaxVmPort}=application:get_env(max_vm_port),
+    {ok,Type}=application:get_env(type),
+    {ok,Source}=application:get_env(source),
+    Args=[{ComputerIpAddr,ComputerPort},{MinVmPort,MaxVmPort},
+	  {Type,Source}],
+
+    {ok,Pid}= computer_service_sup:start(Args),
     {ok,Pid}.
 %% --------------------------------------------------------------------
 %% Func: stop/1

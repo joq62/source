@@ -6,14 +6,15 @@
 %%% Key Datastructures
 %%% ComputerPort: computer_service listen port
 %%% application:set_env(computer_service,[{computer_ip_address_port,{ComputerAddress,ComputerPort},
+%%%                                       {pod_ports,Min,Max},
 %%%                                       {dns_port,DnsPort}])),
-%%% 
-%%% ListofPods=[{pod,PodId,[IpAddr,Port]},,,]
+%%% PodList=[{ErlVmId,ErlVm,[IpAddr,Port]},,,]
 %%%
-%%% setPod(PodId,{IpAddr,Port})->ok|{error,[Error,,,]}
-%%% getPod(PodNode)-> {IpAddr,Port}|{error,[Error,,,]}
-%%% getAllActivePodAddresses()->[{IpAddr,Port},,,]
-%%% pod_info()->ListOfPods
+%%% create_pod(ErlVmId)->ok|{error,Err}
+%%% delete_pod(ErlVmId)->ok|{error,Err}
+%%% list_all_pods()->[{ErlVm,ErlVmId,{IpAddr,Port}}]
+%%% set_pod_ipaddr(ErlVmId,{IpAddr,Port})->ok|{error,[Error,,,]}
+%%% get_pod_ippaddr(ErlVmId)-> {IpAddr,Port}|{error,[Error,,,]}
 %%% 
 %%% LocalDnsList=[{ServiceId,IpAddr,Port}
 %%% setLocalDnsList(DnsList)->ok
@@ -29,8 +30,6 @@
 %% --------------------------------------------------------------------
 %% Include files
 %% --------------------------------------------------------------------
--define(NODES_CONFIG,"nodes.config").
--define(POLL_INTERVAL,1*1000).
 
 %% --------------------------------------------------------------------
  
@@ -39,40 +38,50 @@
 %% 
 %% --------------------------------------------------------------------
 -record(state,{computer_ip_address_port,
-	       pod_list, 
-	       dns_ip_address_port,
-	       dns_list
+	       min_vm_port,
+	       max_vm_port,
+	       type,
+	       source,
+	       list_vms,
+	       list_services
 	      }).
 
-
+-record(vm_info,{vm_id,
+		 node,
+		 ipaddress={}
+		}).
 	  
+-define(MANDATORY,["tcp_service","log_service","local_dns_service"]).
+
 %% --------------------------------------------------------------------
 
 %% ====================================================================
 %% External functions
 %% ====================================================================
-%%% create_pod({IpAddr,Port})->ok|{error,[Error,,,]}
-%%% delete_pod({IpAddr,Port})->ok|{error,[Error,,,]}
-%%% get_all_pod_addresses()->[{IpAddr,Port},,,]
-%%% get_pod_list()->ListOfPods
+%%%
+%%%
+%%% create_vm(ErlVmId,{IpAddr,Port})->ok|{error,Err}
+%%% delete_vm(ErlVmId)->ok|{error,Err}
+%%% list_all_vms()->[{ErlVm,ErlVmId,{IpAddr,Port}}]
+%%% set_vm_ipaddr(ErlVmId,{IpAddr,Port})->ok|{error,[Error,,,]}
+%%% get_vm_ippaddr(ErlVmId)-> {IpAddr,Port}|{error,[Error,,,]}
 %%% 
 %%% LocalDnsList=[{ServiceId,IpAddr,Port}
 %%% set_dns_list(DnsList)->ok
 %%% get_dns_list()->DnsList
 %%% get_service_addresses(ServiceId)-> []|[{IpAddr,Port},,,]
 
--export([ping/0]).
+-export([ping/0,
+	 state_info/0]).
 
--export([create_pod/1,delete_pod/1,
-	 get_all_pod_addresses/0,
-	 get_pod_list/0	 
+-export([
 	]).
 
 -export([set_dns_list/1,get_dns_list/0,
 	 get_service_addresses/1
 	]).
 
--export([start/0,
+-export([start/1,
 	 stop/0
 	 ]).
  
@@ -88,20 +97,12 @@
 
 %% Gen server function
 
-start()-> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+start(Args)-> gen_server:start_link({local, ?MODULE}, ?MODULE, Args, []).
 stop()-> gen_server:call(?MODULE, {stop},infinity).
 
 
 %%----------------------------------------------------------------------
-create_pod({IpAddr,Port})->
-    gen_server:call(?MODULE,{create_pod,{IpAddr,Port}},infinity).
-delete_pod({IpAddr,Port})->
-    gen_server:call(?MODULE,{delete_pod,{IpAddr,Port}},infinity).
 
-get_all_pod_addresses()->
-    gen_server:call(?MODULE,{get_all_pod_addresses},infinity).
-get_pod_list()->
-    gen_server:call(?MODULE,{get_pod_list},infinity).
 get_dns_list()->
     gen_server:call(?MODULE,{get_dns_list},infinity).
 get_service_addresses(ServiceId)->
@@ -109,6 +110,8 @@ get_service_addresses(ServiceId)->
 
 ping()->
     gen_server:call(?MODULE,{ping},infinity).
+state_info()->
+    gen_server:call(?MODULE,{state_info},infinity).
 
 %%------------------ cast ---------------------------------------------
 
@@ -130,14 +133,42 @@ set_dns_list(DnsList)->
 %%          {stop, Reason}
 %
 %% --------------------------------------------------------------------
-init([]) ->
-    {ok,{ComputerAddress,ComputerPort}}=application:get_env(computer_ip_address_port),
-    {ok,{DnsPort}}=application:get_env(computer_ip_address_port),
+init([{ComputerAddress,ComputerPort},{MinVmPort,MaxVmPort},
+      {Type,Source}]) ->
+    lib_computer:scratch(),
+    %%-------- load_start for computer --------
+    TcpService={service_handler:start(node(),"tcp_service",Type,Source,"tcp_service",[]),
+		"tcp_service",ComputerAddress,ComputerPort},
+    ok=rpc:call(node(),tcp_service,start_tcp_server,[ComputerAddress,ComputerPort,parallell]),
+		
+    LogService={service_handler:start(node(),"log_service",Type,Source,"log_service",[]),
+		"log_service",ComputerAddress,ComputerPort},
+    LocalDnsService={service_handler:start(node(),"local_dns_service",Type,Source,"local_dns_service",[]),
+		     "local_dns_service",ComputerAddress,ComputerPort},
+    
+    %%-------- load_start vms  --------
+    {ok,VmStartInfo}=lib_computer:start_vms(MinVmPort,MaxVmPort-MinVmPort,[]),
+    TcpServiceList=[{service_handler:start(Vm,"tcp_service",Type,Source,VmId,[]),"tcp_service",ComputerAddress,Port}||{VmId,Vm,Port}<-VmStartInfo],
+    TcpStart=[{rpc:call(Vm,tcp_service,start_tcp_server,[ComputerAddress,Port,parallell]),"tcp_service",Vm,ComputerAddress,Port}||{_VmId,Vm,Port}<-VmStartInfo],
+    io:format(" ~p~n",[{?MODULE,?LINE}]),
+    LogServiceList=[{service_handler:start(Vm,"log_service",Type,Source,VmId,[]),"log_service",ComputerAddress,Port}||{VmId,Vm,Port}<-VmStartInfo],
+     io:format(" ~p~n",[{?MODULE,?LINE}]),
+    LocalDnsServiceList=[{service_handler:start(Vm,"local_dns_service",Type,Source,VmId,[]),"local_dns_service",ComputerAddress,Port}||{VmId,Vm,Port}<-VmStartInfo],
+    io:format(" ~p~n",[{?MODULE,?LINE}]),
+    
+    L=lists:append([[TcpService],TcpServiceList,[LogService],LogServiceList,[LocalDnsService],LocalDnsServiceList]),
+  %  io:format("L = ~p~n",[{L,?MODULE,?LINE}]),
+ %   ListOfService=lists:append([[TcpService],TcpServiceList,[LogService],LogServiceList,[LocalDnsService],LocalDnsServiceList]),
+    ListOfService=[{ServiceId,IpAddr,Port}||{ok,ServiceId,IpAddr,Port}<-L],
     
     {ok, #state{computer_ip_address_port={ComputerAddress,ComputerPort},
-		pod_list=[], 
-		dns_ip_address_port={"localhost",DnsPort},
-		dns_list=[]}}.
+		min_vm_port=MinVmPort,
+		max_vm_port=MaxVmPort,
+		type=Type,
+		source=Source,
+		list_vms=VmStartInfo,
+		list_services=ListOfService}
+    }.
 
 %% --------------------------------------------------------------------
 %% Function: handle_call/3
@@ -153,18 +184,8 @@ handle_call({ping}, _From, State) ->
     Reply={pong,node(),?MODULE},
     {reply, Reply, State};
 
-handle_call({create_pod,{IpAddr,Port}}, _From, State) ->
-    Reply={IpAddr,Port},
-    {reply, Reply, State};
-handle_call({delete_pod,{IpAddr,Port}}, _From, State) ->
-    Reply={IpAddr,Port},
-    {reply, Reply, State};
-handle_call({get_all_pod_addresses}, _From, State) ->
-     Reply=glurk,
-    {reply, Reply, State};
-
-handle_call({get_pod_list}, _From, State) ->
-      Reply=glurk,
+handle_call({state_info}, _From, State) ->
+    Reply=State,
     {reply, Reply, State};
 
 handle_call({get_service_addresses,ServiceId}, _From, State) ->
@@ -185,10 +206,6 @@ handle_call(Request, From, State) ->
 %%          {noreply, State, Timeout} |
 %%          {stop, Reason, State}            (terminate/2 is called)
 %% --------------------------------------------------------------------
-
-handle_cast({set_dns_list,DnsList},State) ->
-    
-    {noreply, State#state{dns_list=DnsList}};
 
 handle_cast(Msg, State) ->
     io:format("unmatched match cast ~p~n",[{?MODULE,?LINE,Msg}]),

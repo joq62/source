@@ -4,136 +4,98 @@
 %%%
 %%% Created : 10 dec 2012
 %%% -------------------------------------------------------------------
--module(iaas). 
-  
-
-
+-module(lib_computer). 
+ 
 %% --------------------------------------------------------------------
 %% Include files
 %% --------------------------------------------------------------------
 
 %% --------------------------------------------------------------------
--define(IAAS_ETS,iaas_ets).
+-define(FILES_KEEP,["computer_service","Makefile","log_file",
+		       "src","ebin","test_src","test_ebin"]).
 
-%% intermodule 
+-define(SERVICES_2_PRELOAD,["tcp_service","log_service",
+			    "local_dns_service"]).
 %% External exports
--export([init/0,add/4,
-	 change_status/4,
-	 delete/3,delete/4,
-	 all/0,active/0,passive/0,
-	 status/3,
-	 check_all_status/0,change_status/1,
-	 do_ping/2
-       ]).
 
-%-compile(export_all).
+%-export([boot/6]).
+
+-compile(export_all).
+
 %% ====================================================================
 %% External functions
-%% ===================================================================
-init()->
-    ets:new(?IAAS_ETS, [bag, named_table]).
-    
+%% ====================================================================
 
-add(IpAddr,Port,PodC,Status)->
-    ets:match_delete(?IAAS_ETS,{IpAddr,Port,PodC,'_'}),
-    ets:insert(?IAAS_ETS,{IpAddr,Port,PodC,Status}).
-
-change_status(IpAddr,Port,PodC,NewStatus)->
-    add(IpAddr,Port,PodC,NewStatus).
-
-delete(IpAddr,Port,Pod)->
-    ets:match_delete(?IAAS_ETS,{IpAddr,Port,Pod,'_'}).
-
-delete(IpAddr,Port,Pod,Status)->
-    ets:match_delete(?IAAS_ETS,{IpAddr,Port,Pod,Status}).
-
-all()->
-    ets:tab2list(?IAAS_ETS).
-
-active()->
-    L=all(),
-    [{IpAddr,Port,Pod}||{IpAddr,Port,Pod,Status}<-L,
-			Status=:=active].
-
-passive()->
-    L=all(),
-    [{IpAddr,Port,Pod}||{IpAddr,Port,Pod,Status}<-L,
-			Status=:=passive].
-status(IpAddr,Port,Pod)->
-    L=all(),
-    R=[Status||{IpAddr2,Port2,Pod2,Status}<-L,
-	     {IpAddr2,Port2,Pod2}=:={IpAddr,Port,Pod}],
-    case R of
-	[]->
-	    {error,[undef,IpAddr,Port,Pod]};
-	[Status] ->
-	    Status
-    end.
-    
-check_all_status()->
-    L=all(),
-    Result=case L of
-	       []->
-		   {error,no_computers_allocated};
-	       L->
-		   AvaliableComputers=do_ping(L,[]),
-		   change_status(AvaliableComputers),
-		   AvaliableComputers
-	   end,
-    Result.
-
-change_status([])->
-    ok;
-change_status([{ok,{IpAddr,Port,Pod},_Msg}|T])->
-    change_status(IpAddr,Port,Pod,active),
-    change_status(T);
-change_status([{error,{IpAddr,Port,Pod},_Msg}|T])->
-    change_status(IpAddr,Port,Pod,passive),
-    change_status(T).
-
-do_ping([],PingR)->
-    PingR;
-do_ping([{IpAddr,Port,Pod,_Status}|T],Acc) ->
-    case tcp_client:connect(IpAddr,Port) of
-	{error,Err}->
-	    R={error,{IpAddr,Port,Pod},[?MODULE,?LINE,Err]};
-	{ok,Socket}->
-	   % doesnt work!   rpc:call(node(),tcp_client,session_call,[PidSession,{net_adm,ping,[Pod]}],5000),
-	  %  tcp_client:session_call(PidSession,Pod,{net_adm,ping,[Pod]}),
-	    tcp_client:cast(Socket,{net_adm,ping,[Pod]}),
-	    case tcp_client:get_msg(Socket,1000) of
-		pong->
-		    R={ok,{IpAddr,Port,Pod},[]};
-		pang->
-		    R={error,{IpAddr,Port,Pod},[?MODULE,?LINE,pang]};
-		{badrpc,Err}->
-		    R={error,{IpAddr,Port,Pod},[?MODULE,?LINE,badrpc,Err]};
-		Err->
-		    R={error,{IpAddr,Port,Pod},[?MODULE,?LINE,Err]}
-	    end,
-	    tcp_client:disconnect(Socket)
-      end,
-    do_ping(T,[R|Acc]).
-  
 %% --------------------------------------------------------------------
-%% Function:create_worker_node(Service,BoardNode)
+%% Function:init 
 %% Description:
-%% Returns:{ok,PidService}|{error,Err}
+%% Returns: non
 %% --------------------------------------------------------------------
+boot({ComputerIpAddr,ComputerPort},VmMinPort,VmMaxPort,Type,Source)->
+    {ok,_}=scratch(?FILES_KEEP),
+    {ok,VmStartInfo}=start_vms(VmMinPort,VmMaxPort-VmMinPort,[]),
+ %   {ok,Result}=load_start_services(?SERVICES_2_PRELOAD,[]),
+    VmStartInfo.
+
 
 %% --------------------------------------------------------------------
-%%% Internal functions
-%% --------------------------------------------------------------------
-%% --------------------------------------------------------------------
-%% Function: unload_service(Service,BoardNode)
+%% Function:init 
 %% Description:
-%% Returns:ok|{error,Err}
+%% Returns: non
 %% --------------------------------------------------------------------
+load_start_services(Vm,Type,Source,DestinationDir,EnvVariables)->
+    load_start_services(?SERVICES_2_PRELOAD,
+			Vm,Type,Source,DestinationDir,EnvVariables,
+			[]).
+load_start_services([],_Vm,_Type,_Source,_DestinationDir,_EnvVariables,Result)->
+    Result;
+load_start_services([ServiceId|T],Vm,Type,Source,DestinationDir,EnvVariables,Acc) ->
+    R=service_handler:start(Vm,ServiceId,Type,Source,DestinationDir,EnvVariables),
+    ok.
+
 
 %% --------------------------------------------------------------------
-%% Function:stop_service_node(Service,WorkerNode)
+%% Function:init 
 %% Description:
-%% Returns:ok|{error,Err}
+%% Returns: non
+%% --------------------------------------------------------------------
+start_vms(_VmMinPort,-1,VmList)->
+    {ok,VmList};
+start_vms(VmMinPort,N,Acc) ->
+    Port=N+VmMinPort,
+    VmId=integer_to_list(Port)++"_vm",
+    Vm=vm_handler:create(VmId),
+    NewAcc=[{VmId,Vm,Port}|Acc],
+    start_vms(VmMinPort,N-1,NewAcc).
+%% --------------------------------------------------------------------
+%% Function:init 
+%% Description:
+%% Returns: non
+%% --------------------------------------------------------------------
+
+%% --------------------------------------------------------------------
+%% Function:init 
+%% Description:
+%% Returns: non
+%% --------------------------------------------------------------------
+scratch()->
+    scratch(?FILES_KEEP).
+scratch(FilesKeep)->
+    {ok,Files}=file:list_dir("."),
+    Result=[{File,os:cmd("rm -r "++File)}||File<-Files,
+			     false==lists:member(File,FilesKeep)],
+    {ok,Result}.
+
+
+%% --------------------------------------------------------------------
+%% Function:init 
+%% Description:
+%% Returns: non
 %% --------------------------------------------------------------------
 
 
+%% --------------------------------------------------------------------
+%% Function:init 
+%% Description:
+%% Returns: non
+%% --------------------------------------------------------------------
